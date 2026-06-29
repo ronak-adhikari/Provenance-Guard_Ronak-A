@@ -58,6 +58,47 @@ Text to analyze:
     result = json.loads(raw)
     return round(float(result["score"]), 4)
 
+def signal2_stylometrics(text):
+    import re
+    
+    # Split into sentences
+    sentences = re.split(r'[.!?]+', text)
+    sentences = [s.strip() for s in sentences if s.strip()]
+    
+    if len(sentences) < 2:
+        return 0.5  # not enough text to analyze
+    
+    # Metric 1: sentence length variance
+    # AI tends to write uniform sentence lengths, humans vary more
+    sentence_lengths = [len(s.split()) for s in sentences]
+    avg_len = sum(sentence_lengths) / len(sentence_lengths)
+    variance = sum((l - avg_len) ** 2 for l in sentence_lengths) / len(sentence_lengths)
+    # High variance = more human. Normalize: cap at 100, invert so high = AI
+    normalized_variance = min(variance, 100) / 100
+    sentence_score = 1.0 - normalized_variance  # high score = AI-like
+
+    # Metric 2: type-token ratio (TTR)
+    # AI reuses vocabulary more, giving lower TTR
+    words = re.findall(r'\b\w+\b', text.lower())
+    if len(words) == 0:
+        return 0.5
+    ttr = len(set(words)) / len(words)
+    # Low TTR = AI-like. Invert so high score = AI
+    ttr_score = 1.0 - ttr
+
+    # Metric 3: punctuation density
+    # Humans use more varied punctuation (dashes, ellipses, etc.)
+    varied_punct = len(re.findall(r'[—\-–…]', text))
+    total_chars = len(text)
+    punct_density = varied_punct / total_chars if total_chars > 0 else 0
+    # Low varied punctuation = AI-like. Normalize and invert
+    normalized_punct = min(punct_density * 100, 1.0)
+    punct_score = 1.0 - normalized_punct  # high score = AI-like
+
+    # Average the three metrics
+    final_score = round((sentence_score + ttr_score + punct_score) / 3, 4)
+    return final_score
+
 @app.route("/submit", methods=["POST"])
 def submit():
     data = request.get_json()
@@ -70,19 +111,33 @@ def submit():
 
     # Placeholder values until signal is wired in
     llm_score = signal1_llm(text)
-    confidence = round(llm_score * 0.65, 4)
-    attribution = "likely_ai" if llm_score >= 0.65 else "uncertain" if llm_score >= 0.41 else "likely_human"
+    stylo_score = signal2_stylometrics(text)
+    
+    # Weighted blend per planning.md: LLM 65%, stylometrics 35%
+    confidence = round((llm_score * 0.65) + (stylo_score * 0.35), 4)
+    
+    # Map to attribution per planning.md thresholds
+    if confidence >= 0.65:
+        attribution = "likely_ai"
+    elif confidence >= 0.53:
+        attribution = "uncertain_leaning_ai"
+    elif confidence >= 0.41:
+        attribution = "uncertain_leaning_human"
+    else:
+        attribution = "likely_human"
+    
     label = "pending - full label logic in M5"
 
     entry = {
-        "content_id": content_id,
-        "creator_id": creator_id,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "attribution": attribution,
-        "confidence": confidence,
-        "llm_score": None,
-        "status": "classified"
-    }
+            "content_id": content_id,
+            "creator_id": creator_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "attribution": attribution,
+            "confidence": confidence,
+            "llm_score": llm_score,
+            "stylo_score": stylo_score,
+            "status": "classified"
+        }
     write_log(entry)
 
     return jsonify({
